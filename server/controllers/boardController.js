@@ -1,0 +1,81 @@
+import Board from "../models/Board.js";
+import Column from "../models/Column.js";
+import Card from "../models/Card.js";
+
+
+
+
+export const createBoard = async (req, res) => {
+  try {
+    const { name } = req.body;
+
+    if (!name) {
+      return res.status(400).json({ message: "Board name is required" });
+    }
+
+    const board = await Board.create({
+      name,
+      columnIds: [],
+      version: 0
+    });
+
+    res.status(201).json(board);
+  } catch (error) {
+    res.status(500).json({ message: "Failed to create board" });
+  }
+};
+
+
+export const getBoard = async (req, res) => {
+  try {
+    const { boardId } = req.params;
+
+    const board = await Board.findById(boardId);
+    if (!board) {
+      return res.status(404).json({ message: "Board not found" });
+    }
+
+    const columns = await Column.find({ boardId: board._id });
+    const columnIds = columns.map(col => col._id);
+
+    const cards = await Card.find({ columnId: { $in: columnIds } });
+
+    res.status(200).json({
+      board,
+      columns,
+      cards
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Failed to fetch board" });
+  }
+};
+
+export const createColumn = async (req, res) => {
+  try {
+    const { boardId } = req.params;
+    const { title } = req.body;
+
+    if (!title) {
+      return res.status(400).json({ message: "Column title is required" });
+    }
+
+    const board = await Board.findById(boardId);
+    if (!board) {
+      return res.status(404).json({ message: "Board not found" });
+    }
+
+    const column = await Column.create({
+      boardId,
+      title,
+      cardIds: [],
+      version: 0
+    });
+
+    board.columnIds.push(column._id);
+    await board.save();
+
+    res.status(201).json(column);
+  } catch (error) {
+    res.status(500).json({ message: "Failed to create column" });
+  }
+};
