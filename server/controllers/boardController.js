@@ -1,9 +1,7 @@
+import mongoose from "mongoose";
 import Board from "../models/Board.js";
 import Column from "../models/Column.js";
 import Card from "../models/Card.js";
-
-
-
 
 export const createBoard = async (req, res) => {
   try {
@@ -24,7 +22,6 @@ export const createBoard = async (req, res) => {
     res.status(500).json({ message: "Failed to create board" });
   }
 };
-
 
 export const getBoard = async (req, res) => {
   try {
@@ -77,5 +74,92 @@ export const createColumn = async (req, res) => {
     res.status(201).json(column);
   } catch (error) {
     res.status(500).json({ message: "Failed to create column" });
+  }
+};
+
+
+  //  Drag & Drop Backend
+
+
+export const moveCard = async (req, res) => {
+  const {
+    cardId,
+    sourceColumnId,
+    destinationColumnId,
+    sourceIndex,
+    destinationIndex,
+    sourceVersion,
+    destinationVersion
+  } = req.body;
+
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
+  try {
+    // SAME COLUMN MOVE
+    if (sourceColumnId === destinationColumnId) {
+    const column = await Column.findOne(
+      { _id: sourceColumnId, version: sourceVersion }
+    ).session(session);
+
+    if (!column) {
+      await session.abortTransaction();
+      return res.status(409).json({ message: "Version conflict" });
+    }
+
+    // Remove card from old position
+    column.cardIds.splice(sourceIndex, 1);
+
+    // Insert card at new position
+    column.cardIds.splice(destinationIndex, 0, cardId);
+
+    // Increment version
+    column.version += 1;
+
+    await column.save({ session });
+
+    await session.commitTransaction();
+    return res.json({ success: true });
+  }
+
+
+    // CROSS COLUMN MOVE
+    const sourceColumn = await Column.findOneAndUpdate(
+      { _id: sourceColumnId, version: sourceVersion },
+      {
+        $pull: { cardIds: cardId },
+        $inc: { version: 1 }
+      },
+      { new: true, session }
+    );
+
+    if (!sourceColumn) {
+      await session.abortTransaction();
+      return res.status(409).json({ message: "Source version conflict" });
+    }
+
+    const destinationColumn = await Column.findOneAndUpdate(
+      { _id: destinationColumnId, version: destinationVersion },
+      {
+        $push: {
+          cardIds: { $each: [cardId], $position: destinationIndex }
+        },
+        $inc: { version: 1 }
+      },
+      { new: true, session }
+    );
+
+    if (!destinationColumn) {
+      await session.abortTransaction();
+      return res.status(409).json({ message: "Destination version conflict" });
+    }
+
+    await session.commitTransaction();
+    res.json({ success: true });
+  } catch (error) {
+    await session.abortTransaction();
+    res.status(500).json({ message: error.message });
+  } finally {
+    session.endSession();
   }
 };
