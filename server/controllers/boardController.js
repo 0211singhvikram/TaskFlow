@@ -2,6 +2,8 @@ import mongoose from "mongoose";
 import Board from "../models/Board.js";
 import Column from "../models/Column.js";
 import Card from "../models/Card.js";
+import { getIO } from "../socket/index.js";
+
 
 export const createBoard = async (req, res) => {
   try {
@@ -92,42 +94,47 @@ export const moveCard = async (req, res) => {
     destinationVersion
   } = req.body;
 
+  const cardObjectId = new mongoose.Types.ObjectId(cardId);
+
   const session = await mongoose.startSession();
   session.startTransaction();
 
   try {
+    // ===============================
     // SAME COLUMN MOVE
+    // ===============================
     if (sourceColumnId === destinationColumnId) {
-    const column = await Column.findOne(
-      { _id: sourceColumnId, version: sourceVersion }
-    ).session(session);
+      const column = await Column.findOne(
+        { _id: sourceColumnId, version: sourceVersion }
+      ).session(session);
 
-    if (!column) {
-      await session.abortTransaction();
-      return res.status(409).json({ message: "Version conflict" });
+      if (!column) {
+        await session.abortTransaction();
+        return res.status(409).json({ message: "Version conflict" });
+      }
+
+      column.cardIds.splice(sourceIndex, 1);
+      column.cardIds.splice(destinationIndex, 0, cardObjectId);
+      column.version += 1;
+
+      await column.save({ session });
+      await session.commitTransaction();
+
+      const io = getIO();
+      const boardId = column.boardId.toString();
+
+      io.to(`board:${boardId}`).emit("board-updated");
+
+      return res.json({ success: true });
     }
 
-    // Remove card from old position
-    column.cardIds.splice(sourceIndex, 1);
-
-    // Insert card at new position
-    column.cardIds.splice(destinationIndex, 0, cardId);
-
-    // Increment version
-    column.version += 1;
-
-    await column.save({ session });
-
-    await session.commitTransaction();
-    return res.json({ success: true });
-  }
-
-
+    // ===============================
     // CROSS COLUMN MOVE
+    // ===============================
     const sourceColumn = await Column.findOneAndUpdate(
       { _id: sourceColumnId, version: sourceVersion },
       {
-        $pull: { cardIds: cardId },
+        $pull: { cardIds: cardObjectId },
         $inc: { version: 1 }
       },
       { new: true, session }
@@ -142,7 +149,7 @@ export const moveCard = async (req, res) => {
       { _id: destinationColumnId, version: destinationVersion },
       {
         $push: {
-          cardIds: { $each: [cardId], $position: destinationIndex }
+          cardIds: { $each: [cardObjectId], $position: destinationIndex }
         },
         $inc: { version: 1 }
       },
@@ -155,6 +162,12 @@ export const moveCard = async (req, res) => {
     }
 
     await session.commitTransaction();
+
+    const io = getIO();
+    const boardId = sourceColumn.boardId.toString();
+
+    io.to(`board:${boardId}`).emit("board-updated");
+
     res.json({ success: true });
   } catch (error) {
     await session.abortTransaction();

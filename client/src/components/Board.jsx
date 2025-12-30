@@ -1,93 +1,153 @@
-import { useState } from "react";
-import Column from "./Column";
+import { useEffect, useState } from "react";
 import { DragDropContext } from "@hello-pangea/dnd";
+import Column from "./Column";
+import { io } from "socket.io-client";
 
-/**
- * Initial board data (kept outside the component to avoid re-creation on each render)
- */
-const INITIAL_COLUMNS = [
-  {
-    id: "col-1",
-    title: "Todo",
-    cards: [
-      { id: "c1", title: "Learn React", description: "Read official docs" },
-      { id: "c2", title: "Setup Tailwind", description: "Configure Vite & tailwind" },
-    ],
-  },
-  {
-    id: "col-2",
-    title: "In Progress",
-    cards: [{ id: "c3", title: "Build Kanban UI", description: "Board / Column / Card" }],
-  },
-  {
-    id: "col-3",
-    title: "Done",
-    cards: [{ id: "c4", title: "Project Setup", description: "Vite + Tailwind ready" }],
-  },
-];
+
+const BOARD_ID = "6954249107c4417696cc5e71";
+const API = "http://localhost:5000";
+const socket = io("http://localhost:5000");
+
 
 export default function Board() {
-  const [columns, setColumns] = useState(INITIAL_COLUMNS);
+  const [board, setBoard] = useState(null);
+  const [columns, setColumns] = useState([]);
+  const [cards, setCards] = useState([]);
+  const [loading, setLoading] = useState(true);
 
-  // simple id generator for demo cards (ok for client-only usage)
-  const genId = (prefix = "c") =>
-    `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+  // ---------- FETCH / REFETCH ----------
+  async function fetchBoard() {
+    try {
+      const res = await fetch(`${API}/boards/${BOARD_ID}`);
+      const data = await res.json();
 
-  // onDragEnd: handle moving a card between columns (immutable)
-  function onDragEnd(result) {
-    const { source, destination } = result;
+      setBoard(data.board);
+      setColumns(data.columns);
+      setCards(data.cards);
+    } catch (err) {
+      console.error("Failed to fetch board", err);
+    } finally {
+      setLoading(false);
+    }
+  }
 
-    // dropped outside a droppable
+  useEffect(() => {
+    fetchBoard();
+
+    socket.emit("join-board", BOARD_ID);
+
+    socket.on("board-updated", () => {
+      fetchBoard();
+    });
+
+    return () => {
+      socket.off("board-updated");
+    };
+  }, []);
+
+  // ---------- DRAG HANDLER ----------
+  async function onDragEnd(result) {
+    const { source, destination, draggableId } = result;
     if (!destination) return;
 
-    // no movement
-    if (source.droppableId === destination.droppableId && source.index === destination.index)
+    if (
+      source.droppableId === destination.droppableId &&
+      source.index === destination.index
+    )
       return;
 
-    setColumns((prev) => {
-      // create shallow clone of columns with cloned cards arrays
-      const newColumns = prev.map((col) => ({ ...col, cards: [...col.cards] }));
+    // snapshot for rollback
+    const prevColumns = JSON.parse(JSON.stringify(columns));
 
-      const sourceColIndex = newColumns.findIndex((c) => c.id === source.droppableId);
-      const destColIndex = newColumns.findIndex((c) => c.id === destination.droppableId);
+    // ----- OPTIMISTIC UI UPDATE -----
+    setColumns((cols) => {
+      const next = cols.map((c) => ({ ...c, cardIds: [...c.cardIds] }));
 
-      // safety checks
-      if (sourceColIndex === -1 || destColIndex === -1) return prev;
+      const src = next.find((c) => c._id === source.droppableId);
+      const dst = next.find((c) => c._id === destination.droppableId);
+      if (!src || !dst) return cols;
 
-      const sourceCards = newColumns[sourceColIndex].cards;
-      const destCards = newColumns[destColIndex].cards;
+      if (src._id === dst._id) {
+        const [moved] = src.cardIds.splice(source.index, 1);
+        src.cardIds.splice(destination.index, 0, moved);
+      } else {
+        const [moved] = src.cardIds.splice(source.index, 1);
+        dst.cardIds.splice(destination.index, 0, moved);
+      }
 
-      // remove card from source
-      const [moved] = sourceCards.splice(source.index, 1);
-      if (!moved) return prev;
-
-      // insert into destination at the correct index
-      destCards.splice(destination.index, 0, moved);
-
-      return newColumns;
+      return next;
     });
+
+    // ----- BACKEND CALL -----
+    try {
+      const sourceCol = columns.find((c) => c._id === source.droppableId);
+      const destCol = columns.find((c) => c._id === destination.droppableId);
+
+      const res = await fetch(`${API}/boards/${BOARD_ID}/move-card`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          cardId: draggableId,
+          sourceColumnId: source.droppableId,
+          destinationColumnId: destination.droppableId,
+          sourceIndex: source.index,
+          destinationIndex: destination.index,
+          sourceVersion: sourceCol.version,
+          destinationVersion: destCol.version
+        })
+      });
+
+      if (!res.ok) {
+        // conflict or server error → rollback
+        setColumns(prevColumns);
+      }
+
+      // 🔑 ALWAYS RESYNC FROM BACKEND (SUCCESS OR FAILURE)
+      await fetchBoard();
+
+    } catch (err) {
+      // network error → rollback + resync
+      setColumns(prevColumns);
+      await fetchBoard();
+    }
   }
+
+  // ---------- UI ----------
+  if (loading) return <div className="p-6">Loading board...</div>;
+  if (!board) return <div className="p-6 text-red-600">Board not found</div>;
 
   return (
     <div className="min-h-screen bg-indigo-100 p-6">
       <header className="mb-6 flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold">Kanban Board</h1>
-          <p className="text-sm text-gray-600">Project: Real-time collaborative board (local demo)</p>
+          <h1 className="text-2xl font-bold">{board.name}</h1>
+          <p className="text-sm text-gray-600">
+            Backend-driven Kanban board
+          </p>
         </div>
-
-        {/* You can re-enable a single action button here later (e.g. "New Card") */}
         <div className="text-sm text-gray-600">Drag cards to reorder</div>
       </header>
 
       <DragDropContext onDragEnd={onDragEnd}>
-        <main className="flex gap-4 overflow-x-auto pb-6" role="list">
-          {columns.map((col) => (
-            <section key={col.id} className="flex flex-col" aria-labelledby={`col-${col.id}`}>
-              {/* pass id prop required by Column droppable */}
-              <Column id={col.id} title={col.title} cards={col.cards} />
-            </section>
-          ))}
+        <main className="flex gap-4 overflow-x-auto pb-6">
+          {board.columnIds.map((columnId) => {
+            const column = columns.find((c) => c._id === columnId);
+            if (!column) return null;
+
+            const columnCards = column.cardIds
+              .map((id) => cards.find((c) => c._id === id))
+              .filter(Boolean);
+
+            return (
+              <section key={column._id} className="flex flex-col">
+                <Column
+                  id={column._id}
+                  title={column.title}
+                  cards={columnCards}
+                />
+              </section>
+            );
+          })}
         </main>
       </DragDropContext>
     </div>
